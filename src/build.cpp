@@ -1,0 +1,124 @@
+// tpoptoa_build — index a genome FASTA/FASTQ file.
+//
+// Reads all sequences, extracts canonical k-mers, counts occurrences, then
+// builds a TP+OptOA index and serialises it to a binary file.
+//
+// Usage:
+//   tpoptoa_build -i <genome.fa> [-k 31] [-o index.bin]
+//
+// The binary format is:
+//   [8 bytes] magic  0x54504F50544F4100
+//   [8 bytes] k-mer length k
+//   [8 bytes] number of distinct k-mers n
+//   [n * 12 bytes] (kmer_word: uint64_t, count: uint32_t) records
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "../include/kmer.hpp"
+#include "../include/kmer_extractor.hpp"
+#include "../include/fasta_reader.hpp"
+#include "../include/tp_index.hpp"
+
+static const uint64_t INDEX_MAGIC = UINT64_C(0x54504F50544F4100);
+
+static double wall_sec() {
+    using C = std::chrono::steady_clock;
+    static auto t0 = C::now();
+    return std::chrono::duration<double>(C::now() - t0).count();
+}
+
+static void usage(const char* p) {
+    std::fprintf(stderr,
+        "Usage: %s -i <fasta/fastq> [-k <len>] [-o <index.bin>]\n"
+        "  -i  input genome file (FASTA or FASTQ, required)\n"
+        "  -k  k-mer length 1..32 (default: 31)\n"
+        "  -o  output index path (default: index.bin)\n",
+        p);
+}
+
+int main(int argc, char** argv) {
+    const char* input  = nullptr;
+    const char* output = "index.bin";
+    std::size_t k      = 31;
+
+    for (int i = 1; i < argc; ++i) {
+        if      (std::strcmp(argv[i], "-i") == 0 && i+1<argc) input  = argv[++i];
+        else if (std::strcmp(argv[i], "-k") == 0 && i+1<argc) k      = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "-o") == 0 && i+1<argc) output = argv[++i];
+        else if (std::strcmp(argv[i], "-h") == 0) { usage(argv[0]); return 0; }
+        else { std::fprintf(stderr, "Unknown option: %s\n", argv[i]); usage(argv[0]); return 1; }
+    }
+    if (!input) { std::fprintf(stderr, "Error: -i is required.\n"); usage(argv[0]); return 1; }
+    if (k < 1 || k > tpoptoa::MAX_K) {
+        std::fprintf(stderr, "Error: k must be in [1, %zu].\n", tpoptoa::MAX_K);
+        return 1;
+    }
+
+    // Pass 1: count k-mers. We need exact counts before sizing the static index.
+    std::fprintf(stderr, "[build] pass 1: counting k-mers (k=%zu) from %s\n", k, input);
+    std::unordered_map<tpoptoa::KmerWord, uint32_t> counts;
+    counts.reserve(1 << 22);
+
+    try {
+        tpoptoa::iterate_sequences(input, [&](const tpoptoa::SeqRecord& rec) {
+            tpoptoa::extract_kmers(rec.seq, k, [&](tpoptoa::KmerWord kmer) {
+                ++counts[kmer];
+            });
+        });
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Error: %s\n", e.what()); return 1;
+    }
+
+    std::size_t n = counts.size();
+    std::fprintf(stderr, "[build] pass 1 done in %.2fs — %zu distinct k-mers\n",
+                 wall_sec(), n);
+    if (n == 0) { std::fprintf(stderr, "No k-mers found.\n"); return 0; }
+
+    // Pass 2: build the TP+OptOA index.
+    std::fprintf(stderr, "[build] pass 2: building index...\n");
+    tpoptoa::TinyPointerIndex<uint32_t> idx(k, n);
+    for (const auto& [kmer, cnt] : counts)
+        idx.stage(kmer, cnt);
+    counts.clear();
+    { decltype(counts) tmp; tmp.swap(counts); } // release memory before build
+
+    idx.build();
+    std::fprintf(stderr, "[build] pass 2 done in %.2fs — index %.2f MB\n",
+                 wall_sec(), static_cast<double>(idx.bytes()) / (1024.0 * 1024.0));
+
+    // Write index file.
+    FILE* out = std::fopen(output, "wb");
+    if (!out) { std::fprintf(stderr, "Cannot open %s\n", output); return 1; }
+
+    uint64_t k64 = k, n64 = n;
+    std::fwrite(&INDEX_MAGIC, 8, 1, out);
+    std::fwrite(&k64, 8, 1, out);
+    std::fwrite(&n64, 8, 1, out);
+
+    // Re-read the input to emit (kmer, count) records in genomic order
+    // so the index file naturally supports sequential access patterns.
+    try {
+        tpoptoa::iterate_sequences(input, [&](const tpoptoa::SeqRecord& rec) {
+            tpoptoa::extract_kmers(rec.seq, k, [&](tpoptoa::KmerWord kmer) {
+                const uint32_t* v = idx.find(kmer);
+                if (!v) return;
+                uint64_t kw = kmer;
+                std::fwrite(&kw, 8, 1, out);
+                std::fwrite(v, 4, 1, out);
+            });
+        });
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Error: %s\n", e.what()); std::fclose(out); return 1;
+    }
+
+    std::fclose(out);
+    std::fprintf(stderr, "[build] wrote %s in %.2fs\n", output, wall_sec());
+    return 0;
+}
