@@ -1,22 +1,5 @@
 #pragma once
 
-// Portable memory and cache-pressure measurement utilities.
-//
-// Peak RSS: we poll /proc/self/status at build start and end. Linux updates
-// VmRSS continuously so this gives a good approximation of the net allocation.
-//
-// LLC miss proxy: since hardware performance counters aren't available in
-// container environments, we estimate cache pressure from query latency using
-// a two-point model. Random pointer-chasing through a buffer larger than L3
-// gives the full-miss latency (DRAM_NS). An L1-resident access costs ~4 ns.
-// For a measured query latency Q_NS, the estimated miss fraction is:
-//   miss_frac = (Q_NS - L1_NS) / (DRAM_NS - L1_NS)  clamped to [0, 1]
-// LLC misses per 1k queries = miss_frac * 1000.
-//
-// This is a rough model but correctly ranks structures: chaining-based tables
-// with pointer-scattered nodes will show higher miss fractions than open-
-// addressing tables where the probed slots are physically adjacent.
-
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -27,6 +10,7 @@
 
 namespace tpoptoa {
 
+// Reads VmRSS from /proc/self/status (Linux). Returns kB.
 inline std::size_t current_rss_kb() {
     FILE* f = std::fopen("/proc/self/status", "r");
     if (!f) return 0;
@@ -42,7 +26,7 @@ inline std::size_t current_rss_kb() {
     return rss;
 }
 
-// RAII helper: record RSS before and after a build, report the delta.
+// RAII: records RSS before and after an operation, reports peak delta.
 class RssHighWaterMark {
 public:
     RssHighWaterMark() : before_kb_(current_rss_kb()), peak_kb_(before_kb_) {}
@@ -62,9 +46,7 @@ private:
     std::size_t peak_kb_;
 };
 
-// Measure the average pointer-chase latency through a buffer that doesn't fit
-// in L3. Returns nanoseconds per access. Used as the DRAM_NS baseline for the
-// LLC miss proxy calculation.
+// Measures DRAM latency via random pointer chasing in a large buffer.
 inline double pointer_chase_latency_ns(std::size_t buffer_bytes = 64 * 1024 * 1024) {
     struct alignas(64) Node { std::size_t next; char pad[56]; };
 
@@ -79,7 +61,6 @@ inline double pointer_chase_latency_ns(std::size_t buffer_bytes = 64 * 1024 * 10
         std::swap(nodes[i].next, nodes[j].next);
     }
 
-    // One warm-up pass to map all pages.
     volatile std::size_t idx = 0;
     for (std::size_t i = 0; i < n; ++i) idx = nodes[idx].next;
 
@@ -94,8 +75,8 @@ inline double pointer_chase_latency_ns(std::size_t buffer_bytes = 64 * 1024 * 10
     return ns / static_cast<double>(n * 4);
 }
 
-// Estimate LLC misses per 1000 queries from measured query latency.
-// Returns a value in [0, 1000]; never negative.
+// Approximates LLC misses per 1000 queries from measured query latency.
+// Assumes L1 hit = 4 ns, DRAM = measured, linear interpolation.
 inline double estimate_llc_misses_per_1k(double query_ns, double dram_latency_ns) {
     constexpr double L1_NS = 4.0;
     if (dram_latency_ns <= L1_NS) return 0.0;

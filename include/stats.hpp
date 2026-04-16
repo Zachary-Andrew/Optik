@@ -1,18 +1,5 @@
 #pragma once
 
-// Statistical primitives for the benchmark harness.
-//
-// All functions take a std::vector<double> of raw per-trial observations.
-// We follow the same protocol as Wu (2016) for the bitpacking paper: median
-// as the primary point estimate (robust to outliers), with mean ± 95% CI for
-// significance tests. The CI uses the two-tailed Student t-distribution with
-// Bessel-corrected sample variance.
-//
-// Pairwise significance is assessed by Welch's t-test (unequal variance).
-// We also compute Cohen's d to report practical effect size alongside the
-// p-value — a statistically significant difference that is negligible in
-// effect size is not a meaningful performance win.
-
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -29,7 +16,7 @@ inline double mean(const std::vector<double>& v) {
     return std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size());
 }
 
-// Bessel-corrected sample variance (divides by n-1).
+// Sample variance (n‑1 denominator).
 inline double variance(const std::vector<double>& v) {
     if (v.size() < 2) return 0.0;
     double m = mean(v);
@@ -54,9 +41,7 @@ inline double maximum(const std::vector<double>& v) {
     return *std::max_element(v.begin(), v.end());
 }
 
-// Two-tailed t critical value for a 95% CI (α=0.05).
-// Table entries indexed by df = n-1, valid for df 1..29.
-// For df ≥ 30 we use the large-sample approximation 1.960.
+// 95% t‑critical values for degrees of freedom 1..29, then 1.960 approximation.
 inline double t_crit_95(std::size_t n) {
     if (n < 2) return 0.0;
     static const double table[] = {
@@ -69,14 +54,12 @@ inline double t_crit_95(std::size_t n) {
     return (df < 30) ? table[df] : 1.960;
 }
 
-// 95% CI half-width: t * (s / sqrt(n)).
 inline double ci95_half(const std::vector<double>& v) {
     if (v.size() < 2) return 0.0;
     return t_crit_95(v.size()) * stddev(v) / std::sqrt(static_cast<double>(v.size()));
 }
 
-// Cohen's d effect size: standardised mean difference, positive when a > b.
-// Uses pooled standard deviation.
+// Cohen's d: standardised mean difference (positive when a > b).
 inline double cohens_d(const std::vector<double>& a, const std::vector<double>& b) {
     double na = static_cast<double>(a.size());
     double nb = static_cast<double>(b.size());
@@ -93,15 +76,13 @@ inline const char* cohens_label(double d) {
     return "large";
 }
 
-// Regularised incomplete beta function I_x(a,b), implemented via Lentz's
-// continued fraction. Used to compute the t-distribution CDF.
+// Regularised incomplete beta (Lentz's continued fraction). Used for t‑CDF.
 static double ibeta(double x, double a, double b) {
     if (x <= 0.0) return 0.0;
     if (x >= 1.0) return 1.0;
 
     double lbeta = std::lgamma(a) + std::lgamma(b) - std::lgamma(a + b);
 
-    // Symmetry: use the complement when x is large to improve convergence.
     bool swapped = false;
     double xa = x, aa = a, ba = b;
     if (xa > (aa + 1.0) / (aa + ba + 2.0)) {
@@ -135,7 +116,7 @@ static double ibeta(double x, double a, double b) {
     return swapped ? 1.0 - result : result;
 }
 
-// CDF of the t-distribution with nu degrees of freedom at point t.
+// t‑distribution CDF at point t with ν degrees of freedom.
 static double t_cdf(double t, double nu) {
     double x = nu / (nu + t * t);
     double p = ibeta(x, nu / 2.0, 0.5) / 2.0;
@@ -149,8 +130,7 @@ struct WelchResult {
     double cohens_d_val;
 };
 
-// Welch's two-sample t-test (unequal variances). Two-tailed.
-// Also computes Cohen's d for practical significance.
+// Welch's t‑test (unequal variances) + Cohen's d.
 inline WelchResult welch_t_test(const std::vector<double>& a,
                                  const std::vector<double>& b) {
     double na = static_cast<double>(a.size());
@@ -179,7 +159,6 @@ inline WelchResult welch_t_test(const std::vector<double>& a,
     return r;
 }
 
-// Compact significance label.
 inline const char* sig_stars(double p) {
     if (p < 0.001) return "***";
     if (p < 0.010) return "**";

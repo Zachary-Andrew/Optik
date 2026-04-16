@@ -1,13 +1,3 @@
-// Unit tests for TP+OptOA. Requires a FASTA/FASTQ file via -i.
-//
-// Usage:
-//   tpoptoa_test -i genome.fa [-k 31]
-//   cat genome.fa | tpoptoa_test -i -
-//
-// Runs: k-mer encoding, rolling extraction, TinyPointerArray, ElasticHashTable,
-// TinyPointerIndex correctness, real-file round-trip, and a realistic throughput
-// snapshot using sequential genomic queries (matching how tpoptoa_query works).
-
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -36,28 +26,24 @@ static int g_pass = 0, g_fail = 0;
         } \
     } while (0)
 
-
 static void test_kmer_encoding() {
     using namespace tpoptoa;
 
     KmerWord w = 0;
     CHECK(encode_kmer("ACGT", 4, w));
-    CHECK(w == 0b00011011);           // A=00 C=01 G=10 T=11
+    CHECK(w == 0b00011011);
     CHECK(decode_kmer(w, 4) == "ACGT");
-    CHECK(!encode_kmer("ACNT", 4, w)); // N rejects
+    CHECK(!encode_kmer("ACNT", 4, w));
 
-    // ACGT is a palindrome.
     CHECK(reverse_complement(0b00011011, 4) == 0b00011011);
 
     KmerWord fwd = 0; encode_kmer("AAAA", 4, fwd);
     KmerWord rc  = reverse_complement(fwd, 4);
     CHECK(canonical(fwd, 4) == std::min(fwd, rc));
 
-    // Rolling: ACGT + A -> CGTA
     KmerWord rolled = roll_kmer(0b00011011, base_encode('A'), kmer_mask(4));
     CHECK(decode_kmer(rolled, 4) == "CGTA");
 }
-
 
 static void test_kmer_extraction() {
     using namespace tpoptoa;
@@ -70,12 +56,10 @@ static void test_kmer_extraction() {
     extract_kmers("ACG", 4, [&](KmerWord km){ v.push_back(km); });
     CHECK(v.empty());
 
-    // N resets the window; need k more valid bases afterward.
     v.clear();
     extract_kmers("ACGTNACGT", 4, [&](KmerWord km){ v.push_back(km); });
     CHECK(v.size() == 2);
 }
-
 
 static void test_tiny_pointer_array() {
     using namespace tpoptoa;
@@ -99,7 +83,6 @@ static void test_tiny_pointer_array() {
     for (std::size_t i = 0; i < N; ++i)
         CHECK(arr.full_index(i) == TinyPointerArray::block_base(i) + vals[i]);
 
-    // Each pointer uses TINY_BITS bits — packed storage should reflect this.
     std::size_t expected_bytes = (N * TINY_BITS + 63) / 64 * 8;
     CHECK(arr.bytes() == expected_bytes);
 
@@ -111,7 +94,6 @@ static void test_tiny_pointer_array() {
         static_cast<double>(N * 4) / (1024.0 * 1024.0),
         32.0 / static_cast<double>(TINY_BITS));
 }
-
 
 static void test_elastic_hash() {
     using namespace tpoptoa;
@@ -138,8 +120,6 @@ static void test_elastic_hash() {
     if (ref.count(0) == 0) CHECK(ht.find(0) == nullptr);
 }
 
-
-// Build a small synthetic index and verify all entries round-trip correctly.
 static void test_tp_index_synthetic() {
     using namespace tpoptoa;
 
@@ -169,7 +149,6 @@ static void test_tp_index_synthetic() {
     }
     CHECK(hits == ref.size());
 
-    // Verify tiny-pointer bit usage.
     double nd     = static_cast<double>(N);
     double log3n  = (nd > 8.0) ? std::log2(std::log2(std::log2(nd))) : 1.0;
     double bound  = std::ceil(log3n + std::log2(4.0));
@@ -180,15 +159,12 @@ static void test_tp_index_synthetic() {
         TINY_BITS, bound, within ? "OK" : "EXCEEDS BOUND");
 }
 
-
-// Build an index from a real FASTA/FASTQ file and verify every extracted k-mer
-// is findable with the exact count it was staged with.
 static void test_real_file(const char* path, std::size_t k) {
     using namespace tpoptoa;
     std::fprintf(stderr, "=== real-file round-trip: %s (k=%zu) ===\n", path, k);
 
     std::unordered_map<KmerWord, uint32_t> counts;
-    std::vector<KmerWord> queries; // sequential genomic order for throughput test
+    std::vector<KmerWord> queries;
 
     try {
         iterate_sequences(path, [&](const SeqRecord& rec) {
@@ -204,13 +180,11 @@ static void test_real_file(const char* path, std::size_t k) {
     std::fprintf(stderr, "  %zu distinct k-mers, %zu queries\n",
                  counts.size(), queries.size());
 
-    // Build the TP+OptOA index.
     TinyPointerIndex<uint32_t> idx(k, counts.size());
     for (const auto& [kmer, cnt] : counts) idx.stage(kmer, cnt);
     idx.build();
     CHECK(idx.size() == counts.size());
 
-    // Every staged k-mer must return its exact count.
     std::size_t correct = 0;
     for (const auto& [kmer, cnt] : counts) {
         const uint32_t* v = idx.find(kmer);
@@ -218,7 +192,6 @@ static void test_real_file(const char* path, std::size_t k) {
     }
     CHECK(correct == counts.size());
 
-    // A few random k-mers are almost certainly absent from small genomes.
     if (counts.size() < 50000000) {
         std::mt19937_64 rng(0xBEEF);
         KmerWord mask = kmer_mask(k);
@@ -233,7 +206,6 @@ static void test_real_file(const char* path, std::size_t k) {
         if (absent_total > 0) CHECK(absent_ok == absent_total);
     }
 
-    // Tiny-pointer space report for this dataset.
     double nd    = static_cast<double>(counts.size());
     double log3n = (nd > 8.0) ? std::log2(std::log2(std::log2(nd))) : 1.0;
     double bound = std::ceil(log3n + std::log2(4.0));
@@ -243,12 +215,9 @@ static void test_real_file(const char* path, std::size_t k) {
         TINY_BITS, bound,
         (static_cast<double>(TINY_BITS) <= bound + 2.0) ? "OK" : "EXCEEDS BOUND");
 
-    // Throughput snapshot using sequential genomic query order. This is the
-    // realistic access pattern — the same as tpoptoa_query streaming a FASTA.
     const std::size_t L = tpoptoa::PREFETCH_LOOKAHEAD;
     const std::size_t Q = queries.size();
     volatile uint64_t sink = 0;
-    // Warm-up pass.
     for (std::size_t i = 0; i < Q; ++i) {
         if (i + L < Q) idx.prefetch_hint(queries[i + L]);
         const uint32_t* v = idx.find(queries[i]); if (v) sink ^= *v;
@@ -265,7 +234,6 @@ static void test_real_file(const char* path, std::size_t k) {
         "  throughput: %.1fns/query  (%zu queries, genomic order)\n",
         q_s * 1e9 / static_cast<double>(Q), Q);
 }
-
 
 int main(int argc, char** argv) {
     const char* input_file = nullptr;

@@ -1,33 +1,5 @@
 #pragma once
 
-// Elastic hashing with Robin Hood displacement.
-//
-// CHANGES FROM PREVIOUS VERSION
-// ──────────────────────────────
-// 1. PACKED 12-BYTE SLOTS
-//    Original: {uint64_t key, uint32_t value} = 16 bytes due to padding.
-//    Now:      PackedSlot with __attribute__((packed)) = 12 bytes exactly.
-//    For 3.88M k-mers at 1.5× load → 8M slots × 4 bytes saved = 32 MB
-//    smaller table. More of the table fits in LLC, reducing cold-miss
-//    pressure on the first trials of each benchmark run.
-//    Swap uses local temporaries (not std::swap) because packed fields
-//    cannot have their address taken.
-//
-// 2. bits_per_entry() REPORTING
-//    Exposes bytes()*8/size() so the benchmark can print per-method storage
-//    density alongside ns/query. The value reflects total allocated slots
-//    (power-of-2 rounded), not just occupied ones — i.e. it includes the
-//    load-factor overhead, which is the honest number for memory budgeting.
-//
-// 3. REPLICA REMOVED
-//    The dual-channel replica from the previous attempt was reverted.
-//    It caused the build to touch ~192 MB of memory per trial, evicting
-//    the primary table from LLC and making every query pass start cold.
-//    The tailslayer hedging only helps when the table is genuinely
-//    LLC-cold AND you control physical address placement (1 GB hugepage
-//    with /proc/self/pagemap verification). In the benchmark's repeated-
-//    trial loop neither condition holds, so the replica was a regression.
-
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -40,10 +12,7 @@ namespace tpoptoa {
 static constexpr uint64_t EMPTY_KEY = std::numeric_limits<uint64_t>::max();
 static constexpr uint64_t TOMBSTONE = std::numeric_limits<uint64_t>::max() - 1;
 
-// ── Packed 12-byte slot ───────────────────────────────────────────────────────
-// Avoids the 4-byte padding that a plain {uint64_t, uint32_t} struct has.
-// Note: packed fields cannot be passed to std::swap (UB to take their address),
-// so insert() uses explicit temporaries for the Robin Hood swap.
+// Packed 12‑byte slot (key+value). Avoids padding of a plain struct.
 struct alignas(4) PackedSlot {
     uint64_t key   = EMPTY_KEY;
     uint32_t value = 0;
@@ -51,6 +20,7 @@ struct alignas(4) PackedSlot {
 
 static_assert(sizeof(PackedSlot) == 12, "PackedSlot must be 12 bytes");
 
+// Robin Hood hash table with linear probing, packed slots.
 template <typename Value>
 class ElasticHashTable {
     using Slot = PackedSlot;
@@ -70,6 +40,7 @@ public:
     std::size_t size()           const noexcept { return size_; }
     std::size_t max_probe_dist() const noexcept { return max_probe_dist_; }
 
+    // Insert key–value. Returns false if table is full.
     bool insert(uint64_t key, const Value& value) {
         assert(key != EMPTY_KEY && key != TOMBSTONE);
         if (size_ >= slots_.size()) return false;
@@ -93,7 +64,7 @@ public:
             std::size_t rd = probe_distance(s.key, slot);
             if (rd < dist) {
                 if (dist > max_probe_dist_) max_probe_dist_ = dist;
-                // Cannot use std::swap on packed fields.
+                // Swap manually because packed fields cannot be std::swap'd.
                 uint64_t tmp_k = s.key;   s.key   = cur_k; cur_k = tmp_k;
                 uint32_t tmp_v = s.value; s.value = cur_v; cur_v = tmp_v;
                 dist = rd;
@@ -114,7 +85,7 @@ public:
             if (s.key == EMPTY_KEY) return nullptr;
             if (s.key == key)       return reinterpret_cast<const Value*>(&s.value);
             if (probe_distance(s.key, slot) < probe_distance(key, slot))
-                return nullptr;
+                return nullptr;                 // Robin Hood optimisation
             slot = (slot + 1) & mask_;
         }
         return nullptr;
@@ -130,10 +101,9 @@ public:
         __builtin_prefetch(&slots_[primary_slot(key) & mask_], 0, 1);
     }
 
-    // Primary table bytes (no replica).
     std::size_t bytes() const noexcept { return slots_.size() * sizeof(Slot); }
 
-    // Bits of storage per logical key (includes load-factor overhead).
+    // Storage bits per entry (including load‑factor overhead).
     double bits_per_entry() const noexcept {
         if (size_ == 0) return 0.0;
         return static_cast<double>(bytes() * 8) / static_cast<double>(size_);
@@ -148,6 +118,7 @@ public:
     const Slot& slot_ref(std::size_t i) const noexcept { return slots_[i & mask_]; }
 
 private:
+    // Current probe distance for a key at cur_slot.
     std::size_t probe_distance(uint64_t key, std::size_t cur_slot) const noexcept {
         return (cur_slot + slots_.size() - primary_slot(key)) & mask_;
     }

@@ -1,31 +1,3 @@
-// Benchmark harness for TP+OptOA.
-//
-// Reads k-mers from a FASTA/FASTQ file (pass -i genome.fa or pipe via -i -).
-// Builds all three index structures and queries them n times each, then prints
-// a side-by-side average comparison table and significance tests.
-//
-// Usage:
-//   tpoptoa_benchmark -i genome.fa [-n 30] [-k 31] [-o results.tsv]
-//   cat genome.fa | tpoptoa_benchmark -i - [-n 30] [-k 31]
-//
-// The FASTA/FASTQ file is read once up-front to extract all distinct k-mers
-// and the genomic query order. All n trials then re-index from the same in-
-// memory key set and query in the same genomic order — so variance is pure
-// system noise, not data variance. The query order matches tpoptoa_query.
-//
-// Metrics (Table 1 of the paper):
-//   build time (s), peak RSS (MB), index size (MB),
-//   query time (ns/query), estimated LLC misses per 1k queries.
-//
-// Methods:
-//   TP+OptOA     — packed 12-byte slots + Robin Hood + prefetch pipeline (L=8)
-//   StdOpen      — same table, same pipeline, insertion order = genomic
-//   StdUnordered — std::unordered_map, warm-up + timed pass
-//
-// New column: slot_bits — bits of table storage per key for each method,
-//   confirming packed 12-byte slots (TP=SO≈207 bits, SU≈258 bits).
-// PREFETCH_LOOKAHEAD tuned to 8 (was 16); optimal = ceil(DRAM_ns/loop_ns).
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -54,10 +26,6 @@ static inline double elapsed_ns(Clock::time_point t0) {
     return std::chrono::duration<double, std::nano>(Clock::now() - t0).count();
 }
 
-
-// Read every k-mer from the FASTA/FASTQ file. Returns the deduplicated key set
-// and the full traversal order (with repeats) as the query sequence, exactly as
-// tpoptoa_query would process the file.
 static void load_dataset(const char* path, std::size_t k,
                           std::vector<tpoptoa::KmerWord>& keys,
                           std::vector<tpoptoa::KmerWord>& queries) {
@@ -77,9 +45,7 @@ static void load_dataset(const char* path, std::size_t k,
     for (const auto& [kw, _] : seen) keys.push_back(kw);
 }
 
-
-// Pipelined query loop for TP+OptOA and StdOpen.
-// Issuing prefetch_hint(qs[i+L]) while processing qs[i] hides DRAM latency.
+// Pipelined query: prefetch i+L while processing i.
 template <typename Index>
 static double timed_query_pipelined(const Index& idx,
                                      const std::vector<tpoptoa::KmerWord>& qs) {
@@ -87,7 +53,6 @@ static double timed_query_pipelined(const Index& idx,
     const std::size_t L = tpoptoa::PREFETCH_LOOKAHEAD;
     volatile uint64_t sink = 0;
 
-    // Warm-up: bring instruction cache and branch predictor to steady state.
     for (std::size_t i = 0; i < Q; ++i) {
         if (i + L < Q) idx.prefetch_hint(qs[i + L]);
         const auto* v = idx.find(qs[i]);
@@ -104,7 +69,6 @@ static double timed_query_pipelined(const Index& idx,
     return elapsed_ns(t0) / static_cast<double>(Q);
 }
 
-
 struct TrialOut { double build_s, rss_mb, idx_mb, qns, llc, slot_bits; };
 struct CellStats {
     std::string method;
@@ -118,7 +82,6 @@ static void record(CellStats& c, const TrialOut& r) {
     c.idx_mb   .push_back(r.idx_mb);   c.qns      .push_back(r.qns);
     c.llc      .push_back(r.llc);      c.slot_bits.push_back(r.slot_bits);
 }
-
 
 static TrialOut run_tpoptoa(const std::vector<tpoptoa::KmerWord>& keys,
                              const std::vector<tpoptoa::KmerWord>& queries,
@@ -151,7 +114,6 @@ static TrialOut run_tpoptoa(const std::vector<tpoptoa::KmerWord>& keys,
     return r;
 }
 
-
 static TrialOut run_stdopen(const std::vector<tpoptoa::KmerWord>& keys,
                              const std::vector<tpoptoa::KmerWord>& queries,
                              double dram_ns) {
@@ -176,7 +138,6 @@ static TrialOut run_stdopen(const std::vector<tpoptoa::KmerWord>& keys,
     r.llc       = tpoptoa::estimate_llc_misses_per_1k(r.qns, dram_ns);
     return r;
 }
-
 
 static TrialOut run_stdunordered(const std::vector<tpoptoa::KmerWord>& keys,
                                   const std::vector<tpoptoa::KmerWord>& queries,
@@ -222,7 +183,6 @@ static TrialOut run_stdunordered(const std::vector<tpoptoa::KmerWord>& keys,
     return r;
 }
 
-
 static void print_table(FILE* out, const CellStats& tp, const CellStats& so,
                          const CellStats& su, std::size_t n_trials) {
     using namespace tpoptoa::stats;
@@ -255,7 +215,6 @@ static void print_table(FILE* out, const CellStats& tp, const CellStats& so,
         n_trials, tpoptoa::PREFETCH_LOOKAHEAD);
 }
 
-
 static void print_tp_report(FILE* out, const CellStats& tp, std::size_t n) {
     double saving = tp.tp_bits_actual > 0.0 ? 32.0 / tp.tp_bits_actual : 0.0;
     std::fprintf(out,
@@ -269,7 +228,6 @@ static void print_tp_report(FILE* out, const CellStats& tp, std::size_t n) {
         (32.0 * static_cast<double>(n)) / (8.0 * 1024.0 * 1024.0),
         saving);
 }
-
 
 static void print_sig(FILE* out, const CellStats& tp, const CellStats& cmp) {
     using namespace tpoptoa::stats;
@@ -300,7 +258,6 @@ static void print_sig(FILE* out, const CellStats& tp, const CellStats& cmp) {
     std::fprintf(out, "\n");
 }
 
-
 static void write_tsv(const char* path,
                        const CellStats& tp, const CellStats& so, const CellStats& su) {
     FILE* f = std::fopen(path, "w");
@@ -318,7 +275,6 @@ static void write_tsv(const char* path,
     std::fprintf(stderr, "[bench] raw data written to %s\n", path);
 }
 
-
 static void usage(const char* p) {
     std::fprintf(stderr,
         "Usage: %s -i <file|-> [options]\n\n"
@@ -332,7 +288,6 @@ static void usage(const char* p) {
         "  cat chr1.fa | %s -i - -k 31 -n 20\n",
         p, p, p);
 }
-
 
 int main(int argc, char** argv) {
     const char* input   = nullptr;
@@ -357,7 +312,6 @@ int main(int argc, char** argv) {
         "[bench] input=%s  n_trials=%zu  k=%zu  lookahead=%zu  out=%s\n",
         input, n_trials, k, tpoptoa::PREFETCH_LOOKAHEAD, tsv_path);
 
-    // Load k-mers from the file once. Trials reuse this data.
     std::fprintf(stderr, "[bench] loading k-mers...\n");
     std::vector<tpoptoa::KmerWord> keys, queries;
     try { load_dataset(input, k, keys, queries); }

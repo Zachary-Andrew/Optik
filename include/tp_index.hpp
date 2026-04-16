@@ -1,22 +1,5 @@
 #pragma once
 
-// Top-level TP+OptOA index.
-//
-// CHANGES FROM PREVIOUS VERSION
-// ──────────────────────────────
-// 1. PREFETCH_LOOKAHEAD reduced from 16 → 8.
-//    At ~99ns DRAM and ~12ns/query loop body, L=8 gives 96ns of prefetch
-//    lead — just enough to cover one DRAM miss. L=16 was issuing prefetches
-//    192ns ahead, wasting out-of-order execution window slots on 16
-//    outstanding memory requests and evicting useful data from L1/L2
-//    before it was needed. Optimal L = ceil(DRAM_ns / loop_ns) = 9 ≈ 8.
-//
-// 2. Dual-channel replica removed (see elastic_hash.hpp for rationale).
-//
-// 3. bits_per_entry() forwarded from ElasticHashTable for benchmark reporting.
-//
-// 4. TinyPointerArray still built for space reporting, not on query hot path.
-
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -28,10 +11,11 @@
 
 namespace tpoptoa {
 
-// Tuned to ceil(DRAM_ns / loop_body_ns) ≈ ceil(99/12) = 9, rounded to 8.
-// Change this if your DRAM latency or loop body time differ significantly.
+// Prefetch lookahead = ceil(DRAM latency / loop body time).
+// 99ns / 12ns ≈ 9 → 8 gives a safe margin.
 static constexpr std::size_t PREFETCH_LOOKAHEAD = 8;
 
+// Top‑level index: ElasticHashTable for storage + TinyPointerArray for space.
 template <typename Value>
 class TinyPointerIndex {
 public:
@@ -43,11 +27,13 @@ public:
         staging_.reserve(expected_n);
     }
 
+    // Collect (key, value) before build.
     void stage(KmerWord canonical_kmer, const Value& value) {
         assert(!built_);
         staging_.push_back({canonical_kmer, value});
     }
 
+    // Build: insert staged entries into the hash table.
     void build() {
         assert(!built_);
 
@@ -57,7 +43,8 @@ public:
             (void)ok;
         }
 
-        // TinyPointerArray: built for space reporting, not on query hot path.
+        // Tiny pointers: each entry points to itself (trivial mapping).
+        // Used only for space reporting, not on the query path.
         std::size_t n = staging_.size();
         tiny_ptrs_ = TinyPointerArray(n);
         for (std::size_t i = 0; i < n; ++i) {
@@ -70,6 +57,7 @@ public:
         built_  = true;
     }
 
+    // Query: forward to ElasticHashTable.
     const Value* find(KmerWord canonical_kmer) const noexcept {
         assert(built_);
         return table_.find(canonical_kmer);
@@ -88,6 +76,7 @@ public:
     std::size_t k()        const noexcept { return k_; }
     bool        is_built() const noexcept { return built_; }
 
+    // Memory consumption (hash table + tiny pointers).
     std::size_t bytes()          const noexcept { return table_.bytes() + tiny_ptrs_.bytes(); }
     double      bits_per_entry() const noexcept { return table_.bits_per_entry(); }
     std::size_t tiny_ptr_bytes() const noexcept { return tiny_ptrs_.bytes(); }

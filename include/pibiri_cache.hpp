@@ -1,24 +1,5 @@
 #pragma once
 
-// Locality-preserving insertion and prefetch layer, inspired by:
-//   Pibiri, Shibuya & Limasset (2023) "Locality-Preserving Minimal Perfect
-//   Hashing of k-mers", Bioinformatics 39:i534.
-//
-// The key insight is that if we insert keys into a Robin Hood hash table in
-// the same order that the hash function would assign them to slots — i.e.
-// sorted by primary_slot(key) — then keys with adjacent hash values cluster
-// into tight runs of slots. Probe chains for those keys then share cache
-// lines, which reduces LLC misses when queries arrive in a similar order.
-//
-// Build phase: accumulate all (key, value) pairs, sort by primary_slot(key),
-// insert in that order. This is O(n log n) and why TP+OptOA builds slower
-// than StdOpen, which inserts in arbitrary order.
-//
-// Query phase: find() optionally issues a __builtin_prefetch. For the
-// prefetch to actually hide memory latency it must be issued well before
-// the corresponding find() call — use prefetch_hint(queries[i + L]) with
-// the main loop doing find(queries[i]). L=8 works well at ~100ns DRAM.
-
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -31,6 +12,9 @@
 
 namespace tpoptoa {
 
+// Insertion order = sorted by primary_slot(key). This creates spatial locality
+// in the hash table: consecutive inserts go to close slots, so probe chains
+// share cache lines.
 template <typename Value>
 class PibiriCache {
 public:
@@ -50,9 +34,7 @@ public:
     void build() {
         assert(!built_);
 
-        // Sort entries by the primary slot they'll occupy in the hash table.
-        // After sorting, consecutive inserts go to consecutive slots, which
-        // produces the dense spatial clusters that make probe chains cache-local.
+        // Sort by the slot where each key will land.
         std::sort(staging_.begin(), staging_.end(),
                   [&](const Entry& a, const Entry& b) noexcept {
                       return table_.primary_slot(a.key) < table_.primary_slot(b.key);
@@ -68,8 +50,6 @@ public:
         built_ = true;
     }
 
-    // Standard lookup. For best performance use prefetch_hint() + find() in a
-    // pipelined loop rather than calling find() alone in a tight loop.
     const Value* find(KmerWord kmer) const noexcept {
         assert(built_);
         return table_.find(kmer);
@@ -79,8 +59,6 @@ public:
         return const_cast<Value*>(static_cast<const PibiriCache*>(this)->find(kmer));
     }
 
-    // Issue a prefetch for kmer's primary slot. Call this L iterations before
-    // the find(kmer) call so the prefetch has time to complete.
     void prefetch_hint(KmerWord kmer) const noexcept {
         table_.prefetch_hint(kmer);
     }

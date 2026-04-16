@@ -1,17 +1,3 @@
-// tpoptoa_build — index a genome FASTA/FASTQ file.
-//
-// Reads all sequences, extracts canonical k-mers, counts occurrences, then
-// builds a TP+OptOA index and serialises it to a binary file.
-//
-// Usage:
-//   tpoptoa_build -i <genome.fa> [-k 31] [-o index.bin]
-//
-// The binary format is:
-//   [8 bytes] magic  0x54504F50544F4100
-//   [8 bytes] k-mer length k
-//   [8 bytes] number of distinct k-mers n
-//   [n * 12 bytes] (kmer_word: uint64_t, count: uint32_t) records
-
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -61,7 +47,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Pass 1: count k-mers. We need exact counts before sizing the static index.
+    // First pass: count occurrences of each k‑mer.
     std::fprintf(stderr, "[build] pass 1: counting k-mers (k=%zu) from %s\n", k, input);
     std::unordered_map<tpoptoa::KmerWord, uint32_t> counts;
     counts.reserve(1 << 22);
@@ -81,19 +67,19 @@ int main(int argc, char** argv) {
                  wall_sec(), n);
     if (n == 0) { std::fprintf(stderr, "No k-mers found.\n"); return 0; }
 
-    // Pass 2: build the TP+OptOA index.
+    // Second pass: build the TP+OptOA index.
     std::fprintf(stderr, "[build] pass 2: building index...\n");
     tpoptoa::TinyPointerIndex<uint32_t> idx(k, n);
     for (const auto& [kmer, cnt] : counts)
         idx.stage(kmer, cnt);
     counts.clear();
-    { decltype(counts) tmp; tmp.swap(counts); } // release memory before build
+    { decltype(counts) tmp; tmp.swap(counts); }
 
     idx.build();
     std::fprintf(stderr, "[build] pass 2 done in %.2fs — index %.2f MB\n",
                  wall_sec(), static_cast<double>(idx.bytes()) / (1024.0 * 1024.0));
 
-    // Write index file.
+    // Write binary index: magic, k, n, then (kmer, count) pairs.
     FILE* out = std::fopen(output, "wb");
     if (!out) { std::fprintf(stderr, "Cannot open %s\n", output); return 1; }
 
@@ -102,8 +88,6 @@ int main(int argc, char** argv) {
     std::fwrite(&k64, 8, 1, out);
     std::fwrite(&n64, 8, 1, out);
 
-    // Re-read the input to emit (kmer, count) records in genomic order
-    // so the index file naturally supports sequential access patterns.
     try {
         tpoptoa::iterate_sequences(input, [&](const tpoptoa::SeqRecord& rec) {
             tpoptoa::extract_kmers(rec.seq, k, [&](tpoptoa::KmerWord kmer) {

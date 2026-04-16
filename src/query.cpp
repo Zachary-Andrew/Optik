@@ -1,17 +1,3 @@
-// tpoptoa_query — query a TP+OptOA index with FASTA/FASTQ reads.
-//
-// Streams k-mers from the query file in genomic order (exactly as the
-// benchmark does) and looks each one up in the index, printing the count.
-//
-// Usage:
-//   tpoptoa_query -x <index.bin> -q <reads.fq> [-k 31] [-a]
-//
-// Output (tab-separated, one line per k-mer occurrence):
-//   <canonical-kmer>  <count>
-//
-// Use -a to suppress absent k-mers (count 0) from the output.
-// Progress and throughput are written to stderr.
-
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
