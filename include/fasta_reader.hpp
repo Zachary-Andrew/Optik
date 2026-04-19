@@ -88,4 +88,5 @@ void iterate_sequences(const char* path, Callback&& cb) {
     if (fh != stdin) std::fclose(fh);
 }
 
-} // namespace tpoptoa
+}
+

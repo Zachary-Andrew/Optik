@@ -1,0 +1,13 @@
+[package]
+name = "Optik"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "optik"
+path = "tools/src/main.rs"
+ 
+[build-dependencies]
+cc = "1"
+ 
+[dependencies]

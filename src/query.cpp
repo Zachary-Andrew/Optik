@@ -4,43 +4,48 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
+#include <vector>
 
 #include "../include/kmer.hpp"
 #include "../include/kmer_extractor.hpp"
 #include "../include/fasta_reader.hpp"
+#include "../include/tp_index.hpp"
 
 static const uint64_t INDEX_MAGIC = UINT64_C(0x54504F50544F4100);
 
-static std::unordered_map<tpoptoa::KmerWord, uint32_t>
+static tpoptoa::TinyPointerIndex<uint32_t>
 load_index(const char* path, std::size_t& k_out) {
     FILE* f = std::fopen(path, "rb");
     if (!f) throw std::runtime_error(std::string("cannot open: ") + path);
 
     uint64_t magic = 0, k64 = 0, n64 = 0;
     if (std::fread(&magic, 8, 1, f) != 1 ||
-        std::fread(&k64,   8, 1, f) != 1 ||
-        std::fread(&n64,   8, 1, f) != 1)
+        std::fread(&k64, 8, 1, f) != 1 ||
+        std::fread(&n64, 8, 1, f) != 1)
         throw std::runtime_error("truncated index header");
     if (magic != INDEX_MAGIC)
-        throw std::runtime_error("bad magic — rebuild index with tpoptoa_build");
+        throw std::runtime_error("bad magic — rebuild index with optik build");
 
     k_out = static_cast<std::size_t>(k64);
-    std::unordered_map<tpoptoa::KmerWord, uint32_t> map;
-    map.reserve(static_cast<std::size_t>(n64 * 1.3));
+    std::size_t n = static_cast<std::size_t>(n64);
 
-    uint64_t kw = 0; uint32_t cnt = 0;
+    tpoptoa::TinyPointerIndex<uint32_t> idx(k_out, n);
+    uint64_t kw = 0;
+    uint32_t cnt = 0;
     while (std::fread(&kw, 8, 1, f) == 1 && std::fread(&cnt, 4, 1, f) == 1)
-        map.emplace(kw, cnt);
+        idx.stage(kw, cnt);
 
     std::fclose(f);
-    return map;
+
+    // Sorted build keeps probe chains short — same as the benchmark path
+    idx.build();
+    return idx;
 }
 
 static void usage(const char* p) {
     std::fprintf(stderr,
         "Usage: %s -x <index.bin> -q <fasta/fastq> [-k <len>] [-a]\n"
-        "  -x  index file from tpoptoa_build (required)\n"
+        "  -x  index file from optik build (required)\n"
         "  -q  query FASTA or FASTQ file (required)\n"
         "  -k  override k-mer length (default: read from index)\n"
         "  -a  suppress absent k-mers (only print found ones)\n",
@@ -54,10 +59,10 @@ int main(int argc, char** argv) {
     bool only_found = false;
 
     for (int i = 1; i < argc; ++i) {
-        if      (std::strcmp(argv[i], "-x") == 0 && i+1<argc) index_path = argv[++i];
-        else if (std::strcmp(argv[i], "-q") == 0 && i+1<argc) query_path = argv[++i];
-        else if (std::strcmp(argv[i], "-k") == 0 && i+1<argc) k_override = std::atoi(argv[++i]);
-        else if (std::strcmp(argv[i], "-a") == 0)             only_found = true;
+        if (std::strcmp(argv[i], "-x") == 0 && i+1 < argc) index_path = argv[++i];
+        else if (std::strcmp(argv[i], "-q") == 0 && i+1 < argc) query_path = argv[++i];
+        else if (std::strcmp(argv[i], "-k") == 0 && i+1 < argc) k_override = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "-a") == 0) only_found = true;
         else if (std::strcmp(argv[i], "-h") == 0) { usage(argv[0]); return 0; }
         else { std::fprintf(stderr, "Unknown: %s\n", argv[i]); usage(argv[0]); return 1; }
     }
@@ -69,41 +74,68 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[query] loading %s ...\n", index_path);
     auto t0 = std::chrono::steady_clock::now();
     std::size_t k = 0;
-    std::unordered_map<tpoptoa::KmerWord, uint32_t> idx;
+    tpoptoa::TinyPointerIndex<uint32_t> idx(0, 0);
     try { idx = load_index(index_path, k); }
     catch (const std::exception& e) { std::fprintf(stderr, "Error: %s\n", e.what()); return 1; }
     if (k_override) k = k_override;
 
-    double load_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::fprintf(stderr, "[query] loaded %zu entries (k=%zu) in %.2fs\n",
-                 idx.size(), k, load_s);
+    double load_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr, "[query] loaded %zu entries (k=%zu) in %.2fs  %.2f MB\n",
+                 idx.size(), k, load_s,
+                 static_cast<double>(idx.bytes()) / (1024.0 * 1024.0));
 
     uint64_t n_queried = 0, n_found = 0;
-    auto tq = std::chrono::steady_clock::now();
 
+    // Prefetch pipeline: while processing kmer[i], prefetch kmer[i+L]
+    const std::size_t L = tpoptoa::PREFETCH_LOOKAHEAD;
+    std::vector<tpoptoa::KmerWord> window;
+    window.reserve(L + 1);
+
+    auto flush_window = [&]() {
+        for (tpoptoa::KmerWord cur : window) {
+            ++n_queried;
+            const uint32_t* v = idx.find(cur);
+            if (v) ++n_found;
+            if (!only_found || v)
+                std::printf("%s\t%u\n",
+                    tpoptoa::decode_kmer(cur, k).c_str(), v ? *v : 0u);
+        }
+        window.clear();
+    };
+
+    auto tq = std::chrono::steady_clock::now();
     try {
         tpoptoa::iterate_sequences(query_path, [&](const tpoptoa::SeqRecord& rec) {
             tpoptoa::extract_kmers(rec.seq, k, [&](tpoptoa::KmerWord kmer) {
-                ++n_queried;
-                auto it = idx.find(kmer);
-                uint32_t cnt = (it != idx.end()) ? it->second : 0;
-                if (it != idx.end()) ++n_found;
-                if (!only_found || cnt > 0) {
-                    std::printf("%s\t%u\n", tpoptoa::decode_kmer(kmer, k).c_str(), cnt);
+                if (window.size() >= L) {
+                    // Prefetch the incoming kmer while processing the oldest one
+                    idx.prefetch_hint(kmer);
+                    tpoptoa::KmerWord cur = window.front();
+                    window.erase(window.begin());
+                    ++n_queried;
+                    const uint32_t* v = idx.find(cur);
+                    if (v) ++n_found;
+                    if (!only_found || v)
+                        std::printf("%s\t%u\n",
+                            tpoptoa::decode_kmer(cur, k).c_str(), v ? *v : 0u);
                 }
+                window.push_back(kmer);
             });
+            flush_window();
         });
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Error: %s\n", e.what()); return 1;
     }
 
-    double q_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tq).count();
+    double q_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - tq).count();
     std::fprintf(stderr,
         "[query] %zu queries in %.3fs  %.1f ns/query  %zu found (%.1f%%)\n",
         n_queried, q_s,
         n_queried > 0 ? q_s * 1e9 / static_cast<double>(n_queried) : 0.0,
         n_found,
-        n_queried > 0 ? 100.0 * static_cast<double>(n_found) / static_cast<double>(n_queried) : 0.0);
-
+        n_queried > 0 ? 100.0 * static_cast<double>(n_found)
+                                / static_cast<double>(n_queried) : 0.0);
     return 0;
 }

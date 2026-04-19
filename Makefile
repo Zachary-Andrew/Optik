@@ -1,8 +1,7 @@
 # Makefile for TP+OptOA
 #
 # Targets:
-#   all       — build all four executables (default)
-#   test      — build and run the unit tests
+#   all       — build all three executables (default)
 #   bench     — run the full benchmark (30 trials, default sizes)
 #   quick     — run a quick benchmark (5 trials, small sizes, for CI)
 #   clean     — remove build artefacts
@@ -26,12 +25,10 @@ CXXFLAGS := -std=c++17 -O3 -march=native -funroll-loops -ffast-math \
 
 SRCS_BUILD  := src/build.cpp
 SRCS_QUERY  := src/query.cpp
-SRCS_TEST   := src/test.cpp
 SRCS_BENCH  := src/benchmark.cpp
 
 BINS := $(BUILD)/tpoptoa_build \
         $(BUILD)/tpoptoa_query \
-        $(BUILD)/tpoptoa_test  \
         $(BUILD)/tpoptoa_benchmark
 
 .PHONY: all test bench quick clean
@@ -47,9 +44,6 @@ $(BUILD)/tpoptoa_build: $(SRCS_BUILD) $(wildcard include/*.hpp) | $(BUILD)
 $(BUILD)/tpoptoa_query: $(SRCS_QUERY) $(wildcard include/*.hpp) | $(BUILD)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-$(BUILD)/tpoptoa_test: $(SRCS_TEST) $(wildcard include/*.hpp) | $(BUILD)
-	$(CXX) $(CXXFLAGS) $< -o $@
-
 $(BUILD)/tpoptoa_benchmark: $(SRCS_BENCH) $(wildcard include/*.hpp) | $(BUILD)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
@@ -57,10 +51,6 @@ $(BUILD)/tpoptoa_benchmark: $(SRCS_BENCH) $(wildcard include/*.hpp) | $(BUILD)
 # Set it on the command line: make test INPUT=genome.fa
 #                             make bench INPUT=genome.fa
 INPUT ?=
-
-test: $(BUILD)/tpoptoa_test
-	@if [ -z "$(INPUT)" ]; then 	    echo "Usage: make test INPUT=genome.fa"; exit 1; fi
-	$(BUILD)/tpoptoa_test -i $(INPUT) -k $(K)
 
 bench: $(BUILD)/tpoptoa_benchmark
 	@if [ -z "$(INPUT)" ]; then 	    echo "Usage: make bench INPUT=genome.fa"; exit 1; fi

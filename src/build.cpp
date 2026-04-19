@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // First pass: count occurrences of each k‑mer.
+    // Pass 1: count k-mers. We need exact counts before sizing the static index.
     std::fprintf(stderr, "[build] pass 1: counting k-mers (k=%zu) from %s\n", k, input);
     std::unordered_map<tpoptoa::KmerWord, uint32_t> counts;
     counts.reserve(1 << 22);
@@ -67,19 +67,19 @@ int main(int argc, char** argv) {
                  wall_sec(), n);
     if (n == 0) { std::fprintf(stderr, "No k-mers found.\n"); return 0; }
 
-    // Second pass: build the TP+OptOA index.
+    // Pass 2: build the TP+OptOA index.
     std::fprintf(stderr, "[build] pass 2: building index...\n");
     tpoptoa::TinyPointerIndex<uint32_t> idx(k, n);
     for (const auto& [kmer, cnt] : counts)
         idx.stage(kmer, cnt);
     counts.clear();
-    { decltype(counts) tmp; tmp.swap(counts); }
+    { decltype(counts) tmp; tmp.swap(counts); } // release memory before build
 
     idx.build();
     std::fprintf(stderr, "[build] pass 2 done in %.2fs — index %.2f MB\n",
                  wall_sec(), static_cast<double>(idx.bytes()) / (1024.0 * 1024.0));
 
-    // Write binary index: magic, k, n, then (kmer, count) pairs.
+    // Write index file.
     FILE* out = std::fopen(output, "wb");
     if (!out) { std::fprintf(stderr, "Cannot open %s\n", output); return 1; }
 
@@ -88,6 +88,8 @@ int main(int argc, char** argv) {
     std::fwrite(&k64, 8, 1, out);
     std::fwrite(&n64, 8, 1, out);
 
+    // Re-read the input to emit (kmer, count) records in genomic order
+    // so the index file naturally supports sequential access patterns.
     try {
         tpoptoa::iterate_sequences(input, [&](const tpoptoa::SeqRecord& rec) {
             tpoptoa::extract_kmers(rec.seq, k, [&](tpoptoa::KmerWord kmer) {
