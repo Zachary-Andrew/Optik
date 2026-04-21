@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, BufWriter, Write};
 use std::time::Instant;
 use crate::{iterate_fasta, extract_kmers, read_index, entries_to_index,
@@ -24,7 +25,8 @@ pub fn run(index_path: &str, query_path: &str, only_found: bool) -> Result<(), S
     // While the window is full we issue a prefetch for the kmer that just
     // arrived, then immediately resolve the oldest kmer at the front. This
     // keeps `lookahead` cache-line fetches in flight at all times.
-    let mut window: Vec<u64> = Vec::with_capacity(lookahead + 64);
+    // VecDeque gives O(1) pop_front; the old Vec::remove(0) was O(lookahead).
+    let mut window: VecDeque<u64> = VecDeque::with_capacity(lookahead + 64);
 
     let emit = |kmer: u64, n_q: &mut u64, n_f: &mut u64,
                     out: &mut BufWriter<io::StdoutLock>| {
@@ -44,15 +46,14 @@ pub fn run(index_path: &str, query_path: &str, only_found: bool) -> Result<(), S
         extract_kmers(seq, k, |kmer| {
             if window.len() >= lookahead {
                 idx.prefetch(kmer);
-                let cur = window.remove(0);
+                let cur = window.pop_front().unwrap(); // O(1) — was O(lookahead)
                 emit(cur, &mut n_queried, &mut n_found, &mut out);
             }
-            window.push(kmer);
+            window.push_back(kmer);
         });
         // Drain whatever is left at the end of this sequence. There is no
         // future kmer to prefetch against so we just resolve directly.
-        for &kmer in &window { emit(kmer, &mut n_queried, &mut n_found, &mut out); }
-        window.clear();
+        for kmer in window.drain(..) { emit(kmer, &mut n_queried, &mut n_found, &mut out); }
     })?;
 
     let q_s = tq.elapsed().as_secs_f64();

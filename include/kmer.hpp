@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 
 namespace tpoptoa {
@@ -76,8 +77,18 @@ inline KmerWord roll_kmer(KmerWord prev, uint8_t new_base, KmerWord mask) noexce
     return ((prev << 2) | new_base) & mask;
 }
 
-// Mask that keeps only the lowest 2k bits. For k=32, all 64 bits are used.
-inline KmerWord kmer_mask(std::size_t k) noexcept {
+// Mask that keeps only the lowest 2k bits.
+inline KmerWord kmer_mask(std::size_t k) {
+    if (k > MAX_K)
+        throw std::invalid_argument(
+            "k=" + std::to_string(k) + " exceeds MAX_K=" +
+            std::to_string(MAX_K) + "; k-mers require 2k bits and KmerWord is 64-bit");
+    return (k < 32) ? ((KmerWord(1) << (2 * k)) - 1) : ~KmerWord(0);
+}
+
+// noexcept overload for internal callers that have already validated k.
+// Only call this when k is known to be <= MAX_K.
+inline KmerWord kmer_mask_unchecked(std::size_t k) noexcept {
     return (k < 32) ? ((KmerWord(1) << (2 * k)) - 1) : ~KmerWord(0);
 }
 

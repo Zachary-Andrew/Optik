@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufWriter, Write};
 use std::time::Instant;
 use crate::{iterate_fasta, extract_minimizers, myers_align, Index, dynamic_lookahead};
@@ -56,7 +56,9 @@ pub fn run(ref_path: &str, reads_path: &str, k: usize, w: usize, max_ed: i32)
                       else { ref_seqs.iter().map(|s| s.len()).sum::<usize>() / ref_seqs.len() };
     let half = (avg_ref_len / 2).max(50);
 
-    let mut mini_window: Vec<u64> = Vec::with_capacity(lookahead + 8);
+    // VecDeque gives O(1) pop_front for the prefetch pipeline window.
+    // The old Vec::remove(0) was O(lookahead) — a shift of the whole buffer.
+    let mut mini_window: VecDeque<u64> = VecDeque::with_capacity(lookahead + 8);
 
     iterate_fasta(reads_path, |read_name, seq| {
         n_reads += 1;
@@ -66,7 +68,7 @@ pub fn run(ref_path: &str, reads_path: &str, k: usize, w: usize, max_ed: i32)
         extract_minimizers(seq, k, w, |kmer, _read_pos| {
             if mini_window.len() >= lookahead {
                 idx.prefetch(kmer);
-                let cur = mini_window.remove(0);
+                let cur = mini_window.pop_front().unwrap(); // O(1) — was O(lookahead)
                 if idx.find(cur).is_none() { return; }
                 if let Some(hits) = pos_map.get(&cur) {
                     for &(rid, rpos) in hits {
@@ -78,7 +80,7 @@ pub fn run(ref_path: &str, reads_path: &str, k: usize, w: usize, max_ed: i32)
                     }
                 }
             }
-            mini_window.push(kmer);
+            mini_window.push_back(kmer);
         });
 
         for cur in mini_window.drain(..) {

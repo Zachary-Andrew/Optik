@@ -69,6 +69,28 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+// k-mers are packed as 2 bits/base into a u64. MAX_K=32 is the hard limit
+// (64 bits / 2 bits per base). Passing k > 32 to ok_extract_kmers causes
+// kmer_mask() in the C++ layer to compute `1u64 << (2*k)` which overflows
+// u64 and wraps, producing a mask that truncates all k-mers to the same
+// few bits. The observable symptom is only 4^(k-32) distinct k-mers
+// (4 at k=33, 16 at k=34, 64 at k=35, …) instead of ~4^k.
+//
+// Validated once here at the CLI boundary so every subcommand is protected.
+pub const MAX_K: usize = 32;
+
+fn validate_k(k: usize) -> Result<(), String> {
+    if k < 1 || k > MAX_K {
+        return Err(format!(
+            "k={k} is out of range [1, {MAX_K}]. \
+             k-mers are packed as 2 bits/base into a 64-bit word; \
+             k > {MAX_K} overflows the bit mask and silently produces wrong results \
+             (only 4^(k-32) distinct k-mers instead of ~4^k)."
+        ));
+    }
+    Ok(())
+}
+
 // TinyPointerIndex with Robin Hood displacement — the full TP+OptOA implementation.
 // All CLI commands use this; bench.rs also constructs OpenAddr and UnorderedMap
 // as comparison targets.
@@ -344,13 +366,16 @@ USAGE
   optik bench   -i <fasta/fastq>  [-k INT] [-n INT] [-o TSV]
 
 FLAGS
-  -k  k-mer length          (default 31)
+  -k  k-mer length 1..{MAX_K}    (default 31)
   -w  minimizer window size (default 10, map only)
   -e  max edit distance     (default 5,  map/align)
   -n  benchmark trials      (default 5)
   -c  min k-mer count       (default 2,  dbruijn)
   -a  only-found mode       (query: suppress absent k-mers)
   -o  output path
+
+NOTE: k > {MAX_K} overflows the 64-bit k-mer word and produces silently wrong
+results (only 4^(k-32) distinct k-mers). The limit is enforced here.
 ");
 }
 
@@ -371,6 +396,17 @@ fn main() {
     let e: i32   = get("-e").and_then(|v| v.parse().ok()).unwrap_or(5);
     let n: usize = get("-n").and_then(|v| v.parse().ok()).unwrap_or(5);
     let c: u32   = get("-c").and_then(|v| v.parse().ok()).unwrap_or(2);
+
+    // Validate k for every subcommand that uses k-mer extraction.
+    // align does not use k-mers so it is exempt.
+    // map uses minimizers (which are k-mers) so it is included.
+    let uses_kmers = matches!(sub.as_str(), "build" | "query" | "map" | "dbruijn" | "bench");
+    if uses_kmers {
+        if let Err(e) = validate_k(k) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
 
     let result = match sub.as_str() {
         "build"   => build::run(get("-i").expect("-i required"), k,
